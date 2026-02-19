@@ -1,44 +1,57 @@
-name: Create OCI VM
+name: Evergreeners OCI VM Creation
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'  # optional: every hour
+  workflow_dispatch:  # You can manually trigger this from GitHub Actions UI
 
 jobs:
   create-vm:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Install OCI CLI
         run: |
-          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults --install-dir $HOME/oci-cli
+          sudo apt-get update
+          sudo apt-get install -y unzip python3-pip
+          pip3 install oci
 
-      - name: Setup OCI config
+      - name: Configure OCI CLI
         run: |
           mkdir -p $HOME/.oci
-          echo "${{ secrets.OCI_KEY_CONTENT }}" | base64 --decode > $HOME/.oci/oci_api_key.pem
-          cat <<EOF > $HOME/.oci/config
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          key_file=$HOME/.oci/oci_api_key.pem
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
-          EOF
+          echo "[DEFAULT]" > $HOME/.oci/config
+          echo "user=$OCI_USER_OCID" >> $HOME/.oci/config
+          echo "fingerprint=$OCI_FINGERPRINT" >> $HOME/.oci/config
+          echo "key_file=$HOME/.oci/oci_api_key.pem" >> $HOME/.oci/config
+          echo "tenancy=$OCI_TENANCY_OCID" >> $HOME/.oci/config
+          echo "region=$OCI_REGION" >> $HOME/.oci/config
+          echo "$OCI_KEY_CONTENT" | base64 --decode > $HOME/.oci/oci_api_key.pem
           chmod 600 $HOME/.oci/oci_api_key.pem
 
-      - name: Create VM (loop until success)
+      - name: Retry VM Creation Until Success
         run: |
-          set -e
+          echo "Starting VM creation loop..."
           while true; do
-            oci compute instance launch \
-              --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} \
-              --availability-domain $(oci iam availability-domain list --query "data[0].name" --raw-output) \
-              --display-name "evergreeners-vm" \
-              --shape "VM.Standard.E2.1.Micro" \
-              --image-id $(oci compute image list --compartment-id ${{ secrets.OCI_COMPARTMENT_OCID }} --query "data[0].id" --raw-output) \
-              && break || echo "Failed, retrying in 30s..." && sleep 30
+            set -e
+            CREATE_OUTPUT=$(oci compute instance launch \
+              --compartment-id $OCI_COMPARTMENT_OCID \
+              --availability-domain "$OCI_AD" \
+              --shape "VM.Standard.A1.Flex" \
+              --display-name "evergreeners-backend" \
+              --image-id $OCI_UBUNTU_IMAGE_ID \
+              --subnet-id $OCI_SUBNET_ID \
+              --ssh-authorized-keys-file <(echo "$SSH_PUBLIC_KEY") \
+              --wait-for-state RUNNING || true)
+
+            echo "$CREATE_OUTPUT"
+
+            # Check if the VM was successfully created
+            if echo "$CREATE_OUTPUT" | grep -q '"lifecycle-state": "RUNNING"'; then
+              echo "VM successfully created!"
+              break
+            else
+              echo "VM not created yet. Retrying in 2m30s..."
+              sleep 150
+            fi
           done
